@@ -14,3 +14,6 @@ class ResearchState(TypedDict):
     search_results: list[dict]
     article: str
     messages: Annotated[list, add_messages]
+    iteration: int
+    needs_more_search: bool
+    gaps: list[str]

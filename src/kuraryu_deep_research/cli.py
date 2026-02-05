@@ -34,6 +34,8 @@ def main() -> None:
     for i, sq in enumerate(result["subqueries"], 1):
         print(f"  {i}. {sq}")
 
+    print(f"\n🔄 検索反復回数: {result.get('iteration', 1)}回")
+
     print(f"\n📚 収集したソース: {len(result['search_results'])}個")
     source_counts = {}
     for r in result["search_results"]:
@@ -54,7 +56,9 @@ def main() -> None:
     # Save to file
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"research_report_{timestamp}.md"
-    output_path = Path("reports") / Path(filename)
+    output_dir = Path(__file__).parent / "reports"
+    output_dir.mkdir(exist_ok=True)
+    output_path = output_dir / filename
 
     with output_path.open("w", encoding="utf-8") as f:
         f.write(f"# Research Report: {query}\n\n")

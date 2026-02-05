@@ -8,6 +8,8 @@ from ..config import Settings
 from ..tools import SearchTools
 from .state import ResearchState
 
+MAX_ITERATIONS = 3
+
 
 class DeepResearchAgent:
     """Deep Research Agent using LangGraph."""
@@ -24,43 +26,90 @@ class DeepResearchAgent:
         self.graph = self._build_graph()
 
     def _generate_subqueries(self, state: ResearchState) -> ResearchState:
-        """Generate subqueries from main query."""
-        print("\n🤔 ステップ 1/4: サブクエリを生成中...")
+        """Generate subqueries from main query or gaps."""
+        iteration = state.get("iteration", 0)
+        
+        if iteration == 0:
+            print("\n🤔 ステップ 1: サブクエリを生成中...")
+            target = state["query"]
+        else:
+            print(f"\n🔄 反復 {iteration + 1}: 不足情報を補完するクエリを生成中...")
+            target = "不足している観点:\n" + "\n".join(state.get("gaps", []))
+
         prompt = f"""Research Query: "{state['query']}"
+
+{target}
 
 この質問に包括的に答えるための、3-5個の具体的なSub Queryを生成してください。
 Sub Queryのみを1行ずつ返してください。"""
 
         response = self.llm.invoke([SystemMessage(content="あなたはResearch Assistantです。"), HumanMessage(content=prompt)])
-        subqueries = [q.strip() for q in response.content.split("\n") if q.strip()]
+        subqueries = [q.strip() for q in response.content.split("\n") if q.strip() and not q.startswith("#")]
         print(f"✓ {len(subqueries)}個のサブクエリを生成しました")
-        return {"subqueries": subqueries}
+        
+        existing = state.get("subqueries", [])
+        return {"subqueries": existing + subqueries, "iteration": iteration + 1}
 
     def _search_sources(self, state: ResearchState) -> ResearchState:
         """Search multiple sources for information."""
-        print("\n🔍 ステップ 2/4: 複数ソースから情報を検索中...")
-        results = []
-        for i, subquery in enumerate(state["subqueries"], 1):
-            print(f"  [{i}/{len(state['subqueries'])}] {subquery}")
+        iteration = state.get("iteration", 1)
+        print(f"\n🔍 検索中 (反復 {iteration}/{MAX_ITERATIONS})...")
+        
+        results = list(state.get("search_results", []))
+        new_queries = state["subqueries"][-5:]  # 最新のサブクエリのみ検索
+        
+        for i, subquery in enumerate(new_queries, 1):
+            print(f"  [{i}/{len(new_queries)}] {subquery}")
             arxiv_results = self.search_tools.search_arxiv(subquery, max_results=3)
             web_results = self.search_tools.search_web(subquery, max_results=3)
             kaggle_comps = self.search_tools.search_kaggle_competitions(subquery)
             kaggle_datasets = self.search_tools.search_kaggle_datasets(subquery)
-            kaggle_notebooks = self.search_tools.search_kaggle_notebooks(subquery)
-            kaggle_discussions = self.search_tools.search_kaggle_discussions(subquery)
 
             results.extend([{"query": subquery, "source": "arxiv", **r} for r in arxiv_results])
             results.extend([{"query": subquery, "source": "web", **r} for r in web_results])
             results.extend([{"query": subquery, "source": "kaggle-competition", **r} for r in kaggle_comps])
             results.extend([{"query": subquery, "source": "kaggle-dataset", **r} for r in kaggle_datasets])
-            results.extend([{"query": subquery, "source": "kaggle-notebook", **r} for r in kaggle_notebooks])
-            results.extend([{"query": subquery, "source": "kaggle-discussion", **r} for r in kaggle_discussions])
-        print(f"✓ {len(results)}個のソースを収集しました")
+
+        print(f"✓ 合計 {len(results)}個のソースを収集")
         return {"search_results": results}
+
+    def _evaluate_coverage(self, state: ResearchState) -> ResearchState:
+        """Evaluate if collected information is sufficient."""
+        print("\n📊 情報の網羅性を評価中...")
+        
+        results_summary = "\n".join([f"- [{r['source']}] {r['title']}" for r in state["search_results"][:30]])
+        
+        prompt = f"""クエリ: "{state['query']}"
+
+収集した情報源:
+{results_summary}
+
+この情報で元のクエリに十分答えられますか？
+- 十分な場合: 「SUFFICIENT」とだけ回答
+- 不足がある場合: 不足している観点を箇条書きで列挙（最大3つ）"""
+
+        response = self.llm.invoke([SystemMessage(content="あなたはResearch評価者です。"), HumanMessage(content=prompt)])
+        
+        if "SUFFICIENT" in response.content:
+            print("✓ 情報は十分です")
+            return {"needs_more_search": False, "gaps": []}
+        
+        gaps = [line.strip().lstrip("-•").strip() for line in response.content.split("\n") if line.strip() and not line.startswith("不足")]
+        gaps = [g for g in gaps if g][:3]
+        print(f"⚠ 不足している観点: {len(gaps)}個")
+        for gap in gaps:
+            print(f"  - {gap}")
+        return {"needs_more_search": True, "gaps": gaps}
+
+    def _should_continue_search(self, state: ResearchState) -> str:
+        """Decide whether to continue searching or proceed to outline."""
+        if state.get("needs_more_search") and state.get("iteration", 0) < MAX_ITERATIONS:
+            return "generate_subqueries"
+        return "generate_outline"
 
     def _generate_outline(self, state: ResearchState) -> ResearchState:
         """Generate article outline from search results."""
-        print("\n📋 ステップ 3/4: 記事のアウトラインを生成中...")
+        print("\n📋 記事のアウトラインを生成中...")
         results_text = "\n\n".join([f"- {r['title']}: {r.get('summary', r.get('content', ''))[:200]}" for r in state["search_results"]])
         prompt = f"""クエリ: "{state['query']}"
 
@@ -76,7 +125,7 @@ Sub Queryのみを1行ずつ返してください。"""
 
     def _generate_article(self, state: ResearchState) -> ResearchState:
         """Generate final article."""
-        print("\n📝 ステップ 4/4: 最終記事を生成中...")
+        print("\n📝 最終記事を生成中...")
         results_text = "\n\n".join([f"[{r['source']}] {r['title']}\n{r.get('summary', r.get('content', ''))}\nURL: {r['url']}" for r in state["search_results"]])
         prompt = f"""以下のアウトラインに従って、包括的なリサーチ記事を日本語で執筆してください:
 
@@ -97,12 +146,14 @@ Sub Queryのみを1行ずつ返してください。"""
         workflow = StateGraph(ResearchState)
         workflow.add_node("generate_subqueries", self._generate_subqueries)
         workflow.add_node("search_sources", self._search_sources)
+        workflow.add_node("evaluate_coverage", self._evaluate_coverage)
         workflow.add_node("generate_outline", self._generate_outline)
         workflow.add_node("generate_article", self._generate_article)
 
         workflow.set_entry_point("generate_subqueries")
         workflow.add_edge("generate_subqueries", "search_sources")
-        workflow.add_edge("search_sources", "generate_outline")
+        workflow.add_edge("search_sources", "evaluate_coverage")
+        workflow.add_conditional_edges("evaluate_coverage", self._should_continue_search)
         workflow.add_edge("generate_outline", "generate_article")
         workflow.add_edge("generate_article", END)
 
@@ -110,6 +161,16 @@ Sub Queryのみを1行ずつ返してください。"""
 
     def research(self, query: str) -> dict:
         """Run research workflow."""
-        initial_state = {"query": query, "subqueries": [], "outline": "", "search_results": [], "article": "", "messages": []}
+        initial_state: ResearchState = {
+            "query": query,
+            "subqueries": [],
+            "outline": "",
+            "search_results": [],
+            "article": "",
+            "messages": [],
+            "iteration": 0,
+            "needs_more_search": False,
+            "gaps": [],
+        }
         result = self.graph.invoke(initial_state)
         return result
