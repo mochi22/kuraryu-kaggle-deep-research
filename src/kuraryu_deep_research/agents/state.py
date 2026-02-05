@@ -18,3 +18,5 @@ class ResearchState(TypedDict):
     needs_more_search: bool
     gaps: list[str]
     verification_report: str
+    depth: int
+    explored_urls: set[str]

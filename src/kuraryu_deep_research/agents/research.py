@@ -11,6 +11,7 @@ from ..tools import SearchTools
 from .state import ResearchState
 
 MAX_ITERATIONS = 3
+MAX_DEPTH = 2
 
 
 class DeepResearchAgent:
@@ -147,9 +148,73 @@ Sub Queryのみを1行ずつ返してください。"""
         return {"needs_more_search": True, "gaps": gaps}
 
     def _should_continue_search(self, state: ResearchState) -> str:
-        """Decide whether to continue searching or proceed to verification."""
+        """Decide whether to continue searching or proceed to deep dive."""
         if state.get("needs_more_search") and state.get("iteration", 0) < MAX_ITERATIONS:
             return "generate_subqueries"
+        return "deep_dive"
+
+    def _deep_dive(self, state: ResearchState) -> ResearchState:
+        """Extract key references from results and explore them deeper."""
+        depth = state.get("depth", 0)
+        if depth >= MAX_DEPTH:
+            return {}
+
+        print(f"\n🔬 深掘り調査中 (深度 {depth + 1}/{MAX_DEPTH})...")
+
+        explored = state.get("explored_urls") or set()
+        arxiv_results = [r for r in state["search_results"] if r["source"] == "arxiv" and r["url"] not in explored]
+
+        if not arxiv_results:
+            print("  深掘り対象なし")
+            return {"depth": depth + 1}
+
+        # 重要な論文を特定
+        prompt = f"""以下の論文から、元のクエリ「{state['query']}」を深く理解するために
+さらに調査すべき最も重要な論文を最大2つ選んでください。
+
+論文リスト:
+{chr(10).join(f"- {r['title']}" for r in arxiv_results[:10])}
+
+選んだ論文のタイトルのみを1行ずつ出力してください。"""
+
+        response = self.llm.invoke([
+            SystemMessage(content="あなたはResearch Assistantです。"),
+            HumanMessage(content=prompt)
+        ])
+
+        selected_titles = [t.strip().lstrip("-•").strip() for t in response.content.split("\n") if t.strip()]
+        selected = [r for r in arxiv_results if any(t in r["title"] for t in selected_titles)][:2]
+
+        if not selected:
+            return {"depth": depth + 1}
+
+        # 選んだ論文の関連研究を検索
+        new_results = []
+        new_explored = set(explored)
+        for paper in selected:
+            print(f"  → {paper['title'][:50]}...")
+            new_explored.add(paper["url"])
+
+            # 論文タイトルで関連研究を検索
+            related = self.search_tools.search_arxiv(paper["title"], max_results=3)
+            for r in related:
+                if r["url"] not in new_explored:
+                    new_results.append({"query": f"related to: {paper['title']}", "source": "arxiv-deep", **r})
+                    new_explored.add(r["url"])
+
+        print(f"  ✓ {len(new_results)}個の関連論文を発見")
+        return {
+            "search_results": state["search_results"] + new_results,
+            "depth": depth + 1,
+            "explored_urls": new_explored,
+        }
+
+    def _should_continue_deep_dive(self, state: ResearchState) -> str:
+        """Decide whether to continue deep diving."""
+        if state.get("depth", 0) < MAX_DEPTH:
+            new_deep_results = [r for r in state["search_results"] if r["source"] == "arxiv-deep"]
+            if new_deep_results:
+                return "deep_dive"
         return "verify_information"
 
     def _verify_information(self, state: ResearchState) -> ResearchState:
@@ -227,6 +292,7 @@ Sub Queryのみを1行ずつ返してください。"""
         workflow.add_node("generate_subqueries", self._generate_subqueries)
         workflow.add_node("search_sources", self._search_sources)
         workflow.add_node("evaluate_coverage", self._evaluate_coverage)
+        workflow.add_node("deep_dive", self._deep_dive)
         workflow.add_node("verify_information", self._verify_information)
         workflow.add_node("generate_outline", self._generate_outline)
         workflow.add_node("generate_article", self._generate_article)
@@ -235,6 +301,7 @@ Sub Queryのみを1行ずつ返してください。"""
         workflow.add_edge("generate_subqueries", "search_sources")
         workflow.add_edge("search_sources", "evaluate_coverage")
         workflow.add_conditional_edges("evaluate_coverage", self._should_continue_search)
+        workflow.add_conditional_edges("deep_dive", self._should_continue_deep_dive)
         workflow.add_edge("verify_information", "generate_outline")
         workflow.add_edge("generate_outline", "generate_article")
         workflow.add_edge("generate_article", END)
@@ -254,6 +321,8 @@ Sub Queryのみを1行ずつ返してください。"""
             "needs_more_search": False,
             "gaps": [],
             "verification_report": "",
+            "depth": 0,
+            "explored_urls": set(),
         }
         result = self.graph.invoke(initial_state)
         return result
