@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     aws_region: str = "us-west-2"
     model_id: str = "global.anthropic.claude-opus-4-5-20251101-v1:0"
     temperature: float = 0.0
-    max_tokens: int = 8192 # max 200K tokens
+    max_tokens: int = 8192*2 # max 200K tokens
 
     class Config:
         env_file = ".env"
