@@ -1,0 +1,20 @@
+[project]
+name = "kuraryu-deep-research"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "langgraph>=1.0.7",
+    "langchain-community>=0.4.1",
+    "arxiv>=2.4.0",
+    "langchain-aws>=1.2.2",
+    "boto3>=1.42.6",
+    "duckduckgo-search>=8.1.1",
+    "mcp>=1.26.0",
+    "kaggle>=1.8.3",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
