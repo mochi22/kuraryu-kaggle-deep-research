@@ -17,3 +17,4 @@ class ResearchState(TypedDict):
     iteration: int
     needs_more_search: bool
     gaps: list[str]
+    verification_report: str

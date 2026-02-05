@@ -1,5 +1,7 @@
 """Deep Research Agent implementation."""
 
+import boto3
+from botocore.config import Config
 from langchain_aws import ChatBedrock
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import END, StateGraph
@@ -17,9 +19,15 @@ class DeepResearchAgent:
     def __init__(self, settings: Settings) -> None:
         """Initialize agent."""
         self.settings = settings
+        boto_config = Config(read_timeout=6000, retries={"max_attempts": 3})
+        bedrock_client = boto3.client(
+            "bedrock-runtime",
+            region_name=settings.aws_region,
+            config=boto_config,
+        )
         self.llm = ChatBedrock(
             model_id=settings.model_id,
-            region_name=settings.aws_region,
+            client=bedrock_client,
             model_kwargs={"temperature": settings.temperature, "max_tokens": settings.max_tokens},
         )
         self.search_tools = SearchTools()
@@ -54,10 +62,11 @@ Sub Queryのみを1行ずつ返してください。"""
         """Search multiple sources for information."""
         iteration = state.get("iteration", 1)
         print(f"\n🔍 検索中 (反復 {iteration}/{MAX_ITERATIONS})...")
-        
+
         results = list(state.get("search_results", []))
-        new_queries = state["subqueries"][-5:]  # 最新のサブクエリのみ検索
-        
+        new_queries = state["subqueries"][-5:]
+        low_result_queries = []
+
         for i, subquery in enumerate(new_queries, 1):
             print(f"  [{i}/{len(new_queries)}] {subquery}")
             arxiv_results = self.search_tools.search_arxiv(subquery, max_results=3)
@@ -65,13 +74,49 @@ Sub Queryのみを1行ずつ返してください。"""
             kaggle_comps = self.search_tools.search_kaggle_competitions(subquery)
             kaggle_datasets = self.search_tools.search_kaggle_datasets(subquery)
 
-            results.extend([{"query": subquery, "source": "arxiv", **r} for r in arxiv_results])
-            results.extend([{"query": subquery, "source": "web", **r} for r in web_results])
-            results.extend([{"query": subquery, "source": "kaggle-competition", **r} for r in kaggle_comps])
-            results.extend([{"query": subquery, "source": "kaggle-dataset", **r} for r in kaggle_datasets])
+            query_results = []
+            query_results.extend([{"query": subquery, "source": "arxiv", **r} for r in arxiv_results])
+            query_results.extend([{"query": subquery, "source": "web", **r} for r in web_results])
+            query_results.extend([{"query": subquery, "source": "kaggle-competition", **r} for r in kaggle_comps])
+            query_results.extend([{"query": subquery, "source": "kaggle-dataset", **r} for r in kaggle_datasets])
+
+            if len(query_results) < 2:
+                low_result_queries.append(subquery)
+            results.extend(query_results)
+
+        # 結果が少ないクエリを改善して再検索
+        if low_result_queries:
+            print(f"\n🔧 {len(low_result_queries)}個のクエリを改善中...")
+            improved = self._improve_queries(low_result_queries, state["query"])
+            for subquery in improved:
+                print(f"  → {subquery}")
+                arxiv_results = self.search_tools.search_arxiv(subquery, max_results=3)
+                web_results = self.search_tools.search_web(subquery, max_results=3)
+                results.extend([{"query": subquery, "source": "arxiv", **r} for r in arxiv_results])
+                results.extend([{"query": subquery, "source": "web", **r} for r in web_results])
 
         print(f"✓ 合計 {len(results)}個のソースを収集")
         return {"search_results": results}
+
+    def _improve_queries(self, queries: list[str], original_query: str) -> list[str]:
+        """Improve queries that returned few results."""
+        prompt = f"""元のクエリ: "{original_query}"
+
+以下の検索クエリは結果が少なかったです:
+{chr(10).join(f'- {q}' for q in queries)}
+
+各クエリを言い換えて、より検索結果が得られやすい形に改善してください。
+- 専門用語を一般的な言葉に
+- 英語のキーワードを追加
+- より広い概念に変更
+
+改善したクエリのみを1行ずつ出力してください。"""
+
+        response = self.llm.invoke([
+            SystemMessage(content="あなたは検索クエリ最適化の専門家です。"),
+            HumanMessage(content=prompt)
+        ])
+        return [q.strip().lstrip("-•").strip() for q in response.content.split("\n") if q.strip()][:len(queries)]
 
     def _evaluate_coverage(self, state: ResearchState) -> ResearchState:
         """Evaluate if collected information is sufficient."""
@@ -102,10 +147,39 @@ Sub Queryのみを1行ずつ返してください。"""
         return {"needs_more_search": True, "gaps": gaps}
 
     def _should_continue_search(self, state: ResearchState) -> str:
-        """Decide whether to continue searching or proceed to outline."""
+        """Decide whether to continue searching or proceed to verification."""
         if state.get("needs_more_search") and state.get("iteration", 0) < MAX_ITERATIONS:
             return "generate_subqueries"
-        return "generate_outline"
+        return "verify_information"
+
+    def _verify_information(self, state: ResearchState) -> ResearchState:
+        """Verify information across sources and detect contradictions."""
+        print("\n🔍 情報の検証・クロスチェック中...")
+
+        results_text = "\n\n".join(
+            [f"[{i+1}] [{r['source']}] {r['title']}\n{r.get('summary', r.get('content', ''))[:300]}"
+             for i, r in enumerate(state["search_results"][:20])]
+        )
+
+        prompt = f"""クエリ: "{state['query']}"
+
+収集した情報:
+{results_text}
+
+以下の観点で情報を検証してください:
+1. 矛盾する主張: 異なるソース間で矛盾する情報があれば指摘
+2. 信頼性評価: 学術論文(arxiv)は高信頼、一般Web記事は要注意
+3. 情報の鮮度: 古い情報と新しい情報の違いがあれば指摘
+
+検証レポートを簡潔に日本語で出力してください。矛盾がなければ「主要な矛盾は検出されませんでした」と記載。"""
+
+        response = self.llm.invoke([
+            SystemMessage(content="あなたは情報検証の専門家です。"),
+            HumanMessage(content=prompt)
+        ])
+
+        print("✓ 検証完了")
+        return {"verification_report": response.content}
 
     def _generate_outline(self, state: ResearchState) -> ResearchState:
         """Generate article outline from search results."""
@@ -127,14 +201,20 @@ Sub Queryのみを1行ずつ返してください。"""
         """Generate final article."""
         print("\n📝 最終記事を生成中...")
         results_text = "\n\n".join([f"[{r['source']}] {r['title']}\n{r.get('summary', r.get('content', ''))}\nURL: {r['url']}" for r in state["search_results"]])
+        
+        verification = state.get("verification_report", "")
+        verification_note = f"\n\n検証結果を考慮してください:\n{verification}" if verification else ""
+        
         prompt = f"""以下のアウトラインに従って、包括的なリサーチ記事を日本語で執筆してください:
 
 {state['outline']}
 
 以下の情報源を使用してください:
 {results_text}
+{verification_note}
 
 各主張の後に引用URL [source] を含めてください。
+矛盾する情報がある場合は両論併記してください。
 全て日本語で出力してください。"""
 
         response = self.llm.invoke([SystemMessage(content="あなたはResearch Writerです。"), HumanMessage(content=prompt)])
@@ -147,6 +227,7 @@ Sub Queryのみを1行ずつ返してください。"""
         workflow.add_node("generate_subqueries", self._generate_subqueries)
         workflow.add_node("search_sources", self._search_sources)
         workflow.add_node("evaluate_coverage", self._evaluate_coverage)
+        workflow.add_node("verify_information", self._verify_information)
         workflow.add_node("generate_outline", self._generate_outline)
         workflow.add_node("generate_article", self._generate_article)
 
@@ -154,6 +235,7 @@ Sub Queryのみを1行ずつ返してください。"""
         workflow.add_edge("generate_subqueries", "search_sources")
         workflow.add_edge("search_sources", "evaluate_coverage")
         workflow.add_conditional_edges("evaluate_coverage", self._should_continue_search)
+        workflow.add_edge("verify_information", "generate_outline")
         workflow.add_edge("generate_outline", "generate_article")
         workflow.add_edge("generate_article", END)
 
@@ -171,6 +253,7 @@ Sub Queryのみを1行ずつ返してください。"""
             "iteration": 0,
             "needs_more_search": False,
             "gaps": [],
+            "verification_report": "",
         }
         result = self.graph.invoke(initial_state)
         return result
