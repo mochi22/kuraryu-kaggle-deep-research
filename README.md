@@ -1,6 +1,6 @@
 # Deep Research Agent
 
-LangGraphベースのDeep Researchエージェント実装（AWS Bedrock使用）
+LangGraphベースのDeep Researchエージェント（AWS Bedrock使用）
 
 ## 概要
 
@@ -8,81 +8,56 @@ Deep Researchエージェントは、科学論文や技術文書の自動調査�
 
 ### 主な特徴
 
-- **完全自動化**: クエリ入力から最終レポート生成まで自動実行
-- **マルチソース検索**: 学術論文（arXiv）、Web（DuckDuckGo）、Kaggle（データセット・コンペ）を並列検索
-- **引用管理**: 全ての情報に出典を明示してハルシネーション防止
-- **APIキー不要**: 検索エンジンにAPIキー不要（AWS認証のみ）
-- **LangGraph**: 状態管理とワークフロー制御
-- **Kaggle統合**: MCP経由でKaggleデータセット・コンペティション検索
+- **反復的な深掘り検索**: 情報が不足していれば自動で追加検索（最大3回）
+- **情報の検証・クロスチェック**: 複数ソース間の矛盾検出と信頼性評価
+- **検索クエリの動的改善**: 結果が少ないクエリを自動で言い換え
+- **深さ制御**: 重要な論文の参照先を再帰的に探索（最大深度2）
+- **マルチソース検索**: arXiv、Web（DuckDuckGo）、Kaggle
+- **引用管理**: 全ての情報に出典を明示
 
 ## ワークフロー
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│ 1. ユーザークエリ入力                                        │
-│    例: "revisiting deep learning methods for tabular data"  │
-└────────────────────┬────────────────────────────────────────┘
-                     │
-                     ▼
-┌─────────────────────────────────────────────────────────────┐
-│ 2. サブクエリ生成 (generate_subqueries)                     │
-│    - Claude Sonnet 4がメインクエリを分析                    │
-│    - 3-5個の具体的なサブクエリを自動生成                    │
-│    例:                                                       │
-│      • "deep learning architectures for tabular data"       │
-│      • "comparison with traditional ML methods"             │
-│      • "recent advances in tabular deep learning"           │
-└────────────────────┬────────────────────────────────────────┘
-                     │
-                     ▼
-┌─────────────────────────────────────────────────────────────┐
-│ 3. マルチソース検索 (search_sources)                        │
-│    各サブクエリに対して並列実行:                             │
-│    ┌──────────────────┐  ┌──────────────────┐              │
-│    │ arXiv検索        │  │ DuckDuckGo検索   │              │
-│    │ - 学術論文       │  │ - Web記事        │              │
-│    │ - プレプリント   │  │ - ブログ         │              │
-│    │ - 要約・著者情報 │  │ - ドキュメント   │              │
-│    └──────────────────┘  └──────────────────┘              │
-│    ┌──────────────────┐  ┌──────────────────┐              │
-│    │ Kaggleデータセット│  │ Kaggleコンペ     │              │
-│    │ - データセット情報│  │ - コンペ情報     │              │
-│    │ - 説明・メタデータ│  │ - 課題・評価指標 │              │
-│    └──────────────────┘  └──────────────────┘              │
-│    結果を統合してsearch_resultsに格納                        │
-└────────────────────┬────────────────────────────────────────┘
-                     │
-                     ▼
-┌─────────────────────────────────────────────────────────────┐
-│ 4. アウトライン生成 (generate_outline)                      │
-│    - 検索結果を分析                                          │
-│    - 論理的な記事構造を作成                                  │
-│    - セクション・サブセクションを定義                        │
-│    例:                                                       │
-│      1. Introduction                                        │
-│      2. Deep Learning Architectures                         │
-│         2.1 Transformer-based Models                        │
-│         2.2 Attention Mechanisms                            │
-│      3. Benchmarking and Evaluation                         │
-└────────────────────┬────────────────────────────────────────┘
-                     │
-                     ▼
-┌─────────────────────────────────────────────────────────────┐
-│ 5. 記事生成 (generate_article)                              │
-│    - アウトラインに従って各セクションを執筆                 │
-│    - 検索結果から関連情報を抽出                              │
-│    - 引用 [source] を各主張に付与                           │
-│    - 最終的な包括的レポートを生成                            │
-└────────────────────┬────────────────────────────────────────┘
-                     │
-                     ▼
-┌─────────────────────────────────────────────────────────────┐
-│ 6. 出力                                                      │
-│    - サブクエリ一覧                                          │
-│    - 検索ソース数                                            │
-│    - アウトライン                                            │
-│    - 引用付き最終記事                                        │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────────┐
+│ クエリ入力      │
+└────────┬────────┘
+         ▼
+┌─────────────────┐
+│ サブクエリ生成  │◄─────────────────┐
+└────────┬────────┘                  │
+         ▼                           │
+┌─────────────────┐                  │
+│ マルチソース検索 │                  │
+│ + クエリ改善    │                  │
+└────────┬────────┘                  │
+         ▼                           │
+┌─────────────────┐    不足あり      │
+│ 網羅性評価      │──────────────────┘
+└────────┬────────┘
+         │ 十分
+         ▼
+┌─────────────────┐
+│ 深掘り調査      │◄────┐
+│ (関連論文探索)  │     │ 深度 < MAX
+└────────┬────────┘─────┘
+         │ 完了
+         ▼
+┌─────────────────┐
+│ 情報検証        │
+│ (矛盾検出)      │
+└────────┬────────┘
+         ▼
+┌─────────────────┐
+│ アウトライン生成 │
+└────────┬────────┘
+         ▼
+┌─────────────────┐
+│ 記事生成        │
+└────────┬────────┘
+         ▼
+┌─────────────────┐
+│ レポート出力    │
+└─────────────────┘
 ```
 
 ## アーキテクチャ
@@ -93,25 +68,40 @@ kuraryu_deep_research/
 │   ├── research.py      # DeepResearchAgent（メインワークフロー）
 │   └── state.py         # ResearchState（状態管理）
 ├── tools/
-│   └── search.py        # SearchTools（arXiv、DuckDuckGo）
+│   ├── search.py        # SearchTools（arXiv、DuckDuckGo）
+│   └── kaggle.py        # KaggleSearch（Kaggle API）
 ├── config.py            # Settings（設定管理）
 └── cli.py               # CLIインターフェース
 ```
 
 ### 技術スタック
 
-- **LLM**: AWS Bedrock Claude Sonnet 4
+- **LLM**: AWS Bedrock Claude Opus 4.5
 - **フレームワーク**: LangGraph（状態管理・ワークフロー）
-- **検索**: arXiv API、DuckDuckGo Search
+- **検索**: arXiv API、DuckDuckGo Search、Kaggle API
 - **設定管理**: Pydantic Settings
 
-## 機能
+## 機能詳細
 
-- 複数ソース検索（arXiv、DuckDuckGo、Kaggle）
-- サブクエリ自動生成
-- アウトライン生成
-- 引用付き記事生成
-- Kaggleデータセット・コンペティション検索（MCP経由）
+### 1. 反復的な深掘り検索
+- 収集した情報の網羅性をLLMが評価
+- 不足している観点を特定し、追加クエリを生成
+- 最大3回まで反復
+
+### 2. 情報の検証・クロスチェック
+- 異なるソース間の矛盾を検出
+- 信頼性評価（arxiv: 高、Web: 要注意）
+- 情報の鮮度チェック
+
+### 3. 検索クエリの動的改善
+- 結果が2件未満のクエリを自動検出
+- LLMが言い換えを生成（専門用語→一般語、英語キーワード追加等）
+- 改善クエリで再検索
+
+### 4. 深さ制御（再帰的探索）
+- 重要な論文をLLMが選定
+- 選んだ論文の関連研究を検索
+- 最大深度2まで再帰的に探索
 
 ## セットアップ
 
@@ -123,70 +113,107 @@ uv sync
 aws configure
 # または環境変数: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
 
-# Kaggle API認証設定
-# 1. https://www.kaggle.com/settings/account でAPI Tokenをダウンロード
-# 2. ~/.kaggle/kaggle.json に配置
+# Kaggle API認証設定（オプション）
 mkdir -p ~/.kaggle
-mv ~/Downloads/kaggle.json ~/.kaggle/
+# kaggle.json を ~/.kaggle/ に配置
 chmod 600 ~/.kaggle/kaggle.json
 ```
 
 ## 使用方法
 
 ```bash
+# CLIから実行
+uv run deep-research "your research query"
+
+# または直接実行
 uv run python -m kuraryu_deep_research.cli "your research query"
 ```
 
 ### 実行例
 
 ```bash
-uv run python -m kuraryu_deep_research.cli "deep learning for tabular data"
-uv run  python cli.py "下記コンペの解放をまとめて。 https://www.kaggle.com/competitions/vesuvius-challenge-surface-detection"
+uv run deep-research "deep learning for tabular data"
 ```
 
 ### 出力例
 
 ```
-🔍 Researching: deep learning for tabular data
+================================================================================
+🔍 Deep Research Agent
 ================================================================================
 
-📝 Subqueries:
+📌 クエリ: deep learning for tabular data
+⏰ 開始時刻: 2026-02-05 15:00:00
+
+================================================================================
+
+🤔 ステップ 1: サブクエリを生成中...
+✓ 4個のサブクエリを生成しました
+
+🔍 検索中 (反復 1/3)...
+  [1/4] deep learning architectures for tabular data
+  [2/4] comparison with traditional ML methods
+  ...
+✓ 合計 24個のソースを収集
+
+📊 情報の網羅性を評価中...
+✓ 情報は十分です
+
+🔬 深掘り調査中 (深度 1/2)...
+  → TabNet: Attentive Interpretable Tabular Learning...
+  ✓ 5個の関連論文を発見
+
+🔍 情報の検証・クロスチェック中...
+✓ 検証完了
+
+📋 記事のアウトラインを生成中...
+✓ アウトラインを生成しました
+
+📝 最終記事を生成中...
+✓ 記事を生成しました
+
+================================================================================
+📊 リサーチ結果
+================================================================================
+
+📝 生成されたサブクエリ:
   1. deep learning architectures for tabular data
   2. comparison with traditional ML methods
-  3. recent advances in tabular deep learning
+  ...
 
-📚 Found 18 sources
+🔄 検索反復回数: 1回
 
-📋 Outline:
-1. Introduction
-2. Deep Learning Architectures
-   2.1 Transformer-based Models
-   2.2 Attention Mechanisms
-3. Benchmarking and Evaluation
-...
+📚 収集したソース: 29個
+  - arxiv: 15個
+  - web: 8個
+  - arxiv-deep: 5個
+  - kaggle-competition: 1個
 
-📄 Article:
-================================================================================
-[記事本文と引用]
+💾 レポート保存先: /path/to/reports/research_report_20260205_150000.md
 ```
 
 ## 環境変数
 
-- `AWS_REGION`: AWSリージョン（デフォルト: us-west-2）
+| 変数名 | 説明 | デフォルト |
+|--------|------|-----------|
+| `AWS_REGION` | AWSリージョン | us-west-2 |
+| `KAGGLE_USERNAME` | Kaggleユーザー名 | - |
+| `KAGGLE_KEY` | Kaggle APIキー | - |
 
-## 使用技術
+## 設定
 
-- **モデル**: AWS Bedrock Claude Sonnet 4
-- **検索**: 
-  - arXiv（学術論文）
-  - DuckDuckGo（Web検索）
-  - Kaggle API（コンペティション・データセット）
-- **特徴**: 最小限のAPIキー（AWS + Kaggle）
+`config.py` で以下を調整可能：
 
-## 今後の拡張予定
+```python
+aws_region: str = "us-west-2"
+model_id: str = "global.anthropic.claude-opus-4-5-20251101-v1:0"
+temperature: float = 0.0
+max_tokens: int = 4096
+```
 
-- 反復改善機能（特定セクションの深掘り）
-- 画像・図表の理解と生成
-- ドメイン特化型カスタマイズ
-- 評価スイート（完全性、正確性、深さ）
-- ブラウザベースエージェント統合
+`research.py` の定数：
+
+```python
+MAX_ITERATIONS = 3  # 反復検索の最大回数
+MAX_DEPTH = 2       # 深掘り調査の最大深度
+```
